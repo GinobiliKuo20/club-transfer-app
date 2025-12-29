@@ -5,11 +5,13 @@ import io
 # 設定頁面配置
 st.set_page_config(page_title="學生轉社系統", layout="wide")
 
-def process_allocation(students_df, clubs_df):
+def process_allocation(students_df, clubs_df, h1_forbidden=[], h2_forbidden=[]):
     """
     執行轉社分發邏輯
-    students_df: 包含 [學號, 姓名, 填寫時間, 原社團, 志願1..10]
+    students_df: 包含 [學號, 姓名, 班級, 填寫時間, 原社團, 志願1..10]
     clubs_df: 包含 [社團名稱, 目前缺額] (Index: 社團名稱)
+    h1_forbidden: 高一禁止轉入的社團列表
+    h2_forbidden: 高二禁止轉入的社團列表
     """
     
     # 1. 初始化資料
@@ -28,22 +30,49 @@ def process_allocation(students_df, clubs_df):
     # 建立學生狀態物件列表
     students = []
     for idx, row in students_df.iterrows():
+        # --- 判斷年級 ---
+        grade = None
+        try:
+            cls_str = str(row['班級']).strip()
+            # 假設班級格式可能為 "101", "205" 或 "101班" 等，嘗試提取數字
+            # 這裡簡化處理，假設前三碼為數字或整體可轉為數字
+            cls_num = int(''.join(filter(str.isdigit, cls_str))[:3])
+            
+            if 101 <= cls_num <= 115:
+                grade = 1
+            elif 201 <= cls_num <= 215:
+                grade = 2
+        except:
+            pass # 無法判斷年級則視為無限制
+
+        forbidden_clubs = set()
+        if grade == 1:
+            forbidden_clubs = set(h1_forbidden)
+        elif grade == 2:
+            forbidden_clubs = set(h2_forbidden)
+
         prefs = []
         for i in range(1, 11):
             col_name = f'志願{i}'
             if col_name in row and pd.notna(row[col_name]):
                 p = str(row[col_name]).strip()
                 if p: # 排除空字串
+                    # --- 檢查限制 ---
+                    if p in forbidden_clubs:
+                        # 該社團對此年級禁止轉入，直接忽略（從等待清單刪除）
+                        continue
                     prefs.append(p)
         
         students.append({
             'id': row['學號'],
             'name': row['姓名'],
+            'class': row['班級'],
             'original_club': str(row['原社團']).strip() if pd.notna(row['原社團']) else "",
             'prefs': prefs,
             'current_club': str(row['原社團']).strip() if pd.notna(row['原社團']) else "", # 初始狀態在原社團
             'status': '原社團', # 狀態標記: 原社團, 轉社成功, 志願落空(維持原社團)
-            'rank': 999 # 當前錄取的志願序 (999 代表原社團/未錄取)
+            'rank': 999, # 當前錄取的志願序 (999 代表原社團/未錄取)
+            'grade': grade
         })
 
     # 2. 核心分發迴圈 (Ripple Effect / Chain Reaction)
@@ -148,6 +177,7 @@ def process_allocation(students_df, clubs_df):
         res = {
             '學號': s['id'],
             '姓名': s['name'],
+            '班級': s['class'],
             '原社團': s['original_club'],
             '分發結果': s['current_club'],
             '錄取志願序': s['rank'] + 1 if s['rank'] != 999 else '未轉社',
@@ -175,7 +205,7 @@ if uploaded_students:
         students_df.columns = students_df.columns.str.strip()
         
         # 基本欄位檢查
-        req_cols = ['學號', '姓名', '填寫時間', '原社團']
+        req_cols = ['學號', '班級', '填寫時間', '原社團'] # 姓名不再是必填
         missing_cols = [c for c in req_cols if c not in students_df.columns]
         
         if missing_cols:
@@ -184,9 +214,33 @@ if uploaded_students:
             st.sidebar.info("請檢查 Excel 標題列是否包含上述欄位，且沒有多餘的空白或錯字。")
             students_df = None
         else:
-            st.sidebar.success(f"已讀取 {len(students_df)} 名學生資料")
+            # 檢查學號是否重複
+            if students_df['學號'].duplicated().any():
+                dup_ids = students_df[students_df['學號'].duplicated()]['學號'].unique()
+                st.sidebar.error(f"發現重複學號，無法處理: {list(dup_ids)}")
+                st.sidebar.warning("請修正 Excel 中的重複學號後重新上傳。")
+                students_df = None
+            else:
+                # 若無姓名欄位，自動填補 (為了顯示方便)
+                if '姓名' not in students_df.columns:
+                    students_df['姓名'] = ""
+                
+                # 再次確保學號轉為字串比較安全
+                students_df['學號'] = students_df['學號'].astype(str).str.strip()
+
+                st.sidebar.success(f"已讀取 {len(students_df)} 名學生資料")
     except Exception as e:
         st.sidebar.error(f"讀取錯誤: {e}")
+
+# 準備所有社團列表供選單使用
+all_clubs_found = set()
+if students_df is not None:
+    if '原社團' in students_df.columns:
+        all_clubs_found.update(students_df['原社團'].dropna().unique())
+    for i in range(1, 11):
+        if f'志願{i}' in students_df.columns:
+            all_clubs_found.update(students_df[f'志願{i}'].dropna().astype(str).unique())
+    all_clubs_found = {c for c in all_clubs_found if c and str(c).strip()}
 
 # 社團缺額設定
 st.sidebar.header("2. 社團缺額設定")
@@ -208,26 +262,30 @@ if quota_mode == "上傳 Excel":
             st.sidebar.error(f"讀取錯誤: {e}")
 else:
     st.sidebar.info("請在右側主畫面表格輸入社團缺額")
-    # 預設一些空資料或是從學生志願中提取社團名稱? 
-    # 為了方便，如果有上傳學生檔，可以嘗試提取所有出現過的社團
+    
     if students_df is not None:
-        all_clubs = set()
-        if '原社團' in students_df.columns:
-            all_clubs.update(students_df['原社團'].dropna().unique())
-        for i in range(1, 11):
-            if f'志願{i}' in students_df.columns:
-                all_clubs.update(students_df[f'志願{i}'].dropna().astype(str).unique())
-        
-        # 移除空值
-        all_clubs = {c for c in all_clubs if c and str(c).strip()}
-        
         # 如果 session state 還沒存，就初始化
         if 'editor_clubs' not in st.session_state:
-            init_data = [{'社團名稱': c, '目前缺額': 0} for c in sorted(list(all_clubs))]
+            init_data = [{'社團名稱': c, '目前缺額': 0} for c in sorted(list(all_clubs_found))]
             st.session_state['editor_clubs'] = pd.DataFrame(init_data)
     else:
         if 'editor_clubs' not in st.session_state:
              st.session_state['editor_clubs'] = pd.DataFrame([{'社團名稱': '範例社團', '目前缺額': 5}])
+
+# 限制設定
+st.sidebar.header("3. 限制設定")
+st.sidebar.caption("設定特定年級無法轉入的社團 (將自動略過該志願)")
+available_clubs_list = sorted(list(all_clubs_found)) if all_clubs_found else []
+
+h1_forbidden = st.sidebar.multiselect(
+    "❌ 高一 (101-115) 不能轉入的社團",
+    options=available_clubs_list
+)
+
+h2_forbidden = st.sidebar.multiselect(
+    "❌ 高二 (201-215) 不能轉入的社團",
+    options=available_clubs_list
+)
 
 # Main Area
 if students_df is not None:
@@ -256,7 +314,7 @@ if start_btn and students_df is not None and not clubs_df.empty:
         # 確保 clubs_df 格式正確 (如果是 data_editor 回傳的，可能型別要轉)
         clubs_df['目前缺額'] = pd.to_numeric(clubs_df['目前缺額'], errors='coerce').fillna(0).astype(int)
         
-        result_df, vacancies_df = process_allocation(students_df, clubs_df)
+        result_df, vacancies_df = process_allocation(students_df, clubs_df, h1_forbidden=h1_forbidden, h2_forbidden=h2_forbidden)
         
         st.session_state['result_df'] = result_df
         st.session_state['final_vacancies'] = vacancies_df
