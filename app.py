@@ -230,6 +230,11 @@ else:
              st.session_state['editor_clubs'] = pd.DataFrame([{'社團名稱': '範例社團', '目前缺額': 5}])
 
 # Main Area
+if students_df is not None:
+    with st.expander("📄 檢視已上傳學生資料 (前 5 筆)", expanded=True):
+        st.dataframe(students_df.head())
+        st.caption(f"共 {len(students_df)} 筆資料。")
+
 c1, c2 = st.columns([2, 1])
 
 with c1:
