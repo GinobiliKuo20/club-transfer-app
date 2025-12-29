@@ -5,187 +5,239 @@ import io
 # 設定頁面配置
 st.set_page_config(page_title="學生轉社系統", layout="wide")
 
-def process_allocation(students_df, clubs_df, h1_forbidden=[], h2_forbidden=[]):
-    """
-    執行轉社分發邏輯
-    students_df: 包含 [學號, 姓名, 班級, 填寫時間, 原社團, 志願1..10]
-    clubs_df: 包含 [社團名稱, 目前缺額] (Index: 社團名稱)
-    h1_forbidden: 高一禁止轉入的社團列表
-    h2_forbidden: 高二禁止轉入的社團列表
-    """
-    
-    # 1. 初始化資料
-    # 建立社團缺額字典 (使用 dict 提升效能，並追蹤狀態)
-    club_vacancies = clubs_df['目前缺額'].to_dict()
-    
-    # 學生列表，依照填寫時間排序 (假設輸入時已經 sorted，或在此 sort)
-    # 確保 '填寫時間' 格式正確，若無法 parsed 則可能需要 error handling，這裡假設已正確
-    if '填寫時間' in students_df.columns:
-        try:
-            students_df['填寫時間'] = pd.to_datetime(students_df['填寫時間'])
-            students_df = students_df.sort_values(by='填寫時間')
-        except:
-            st.warning("填寫時間格式無法解析，將使用原始順序進行分發。")
-            
-    # 建立學生狀態物件列表
-    students = []
-    for idx, row in students_df.iterrows():
-        # --- 判斷年級 ---
-        grade = None
-        try:
-            cls_str = str(row['班級']).strip()
-            # 假設班級格式可能為 "101", "205" 或 "101班" 等，嘗試提取數字
-            # 這裡簡化處理，假設前三碼為數字或整體可轉為數字
-            cls_num = int(''.join(filter(str.isdigit, cls_str))[:3])
-            
-            if 101 <= cls_num <= 115:
-                grade = 1
-            elif 201 <= cls_num <= 215:
-                grade = 2
-        except:
-            pass # 無法判斷年級則視為無限制
-
-        forbidden_clubs = set()
-        if grade == 1:
-            forbidden_clubs = set(h1_forbidden)
-        elif grade == 2:
-            forbidden_clubs = set(h2_forbidden)
-
-        prefs = []
-        for i in range(1, 11):
-            col_name = f'志願{i}'
-            if col_name in row and pd.notna(row[col_name]):
-                p = str(row[col_name]).strip()
-                if p: # 排除空字串
-                    # --- 檢查限制 ---
-                    if p in forbidden_clubs:
-                        # 該社團對此年級禁止轉入，直接忽略（從等待清單刪除）
-                        continue
-                    prefs.append(p)
+# --- 1. 資料模型類別 (Class Definitions) ---
+class Student:
+    def __init__(self, data, h1_forbidden, h2_forbidden, h1_ban_all, h2_ban_all):
+        self.id = str(data['學號']).strip()
+        self.name = data.get('姓名', '')
+        self.original_club = str(data.get('原社團', '')).strip()
+        self.class_str = str(data.get('班級', '')).strip() # Store original class string
         
-        students.append({
-            'id': row['學號'],
-            'name': row['姓名'],
-            'class': row['班級'],
-            'original_club': str(row['原社團']).strip() if pd.notna(row['原社團']) else "",
-            'prefs': prefs,
-            'current_club': str(row['原社團']).strip() if pd.notna(row['原社團']) else "", # 初始狀態在原社團
-            'status': '原社團', # 狀態標記: 原社團, 轉社成功, 志願落空(維持原社團)
-            'rank': 999, # 當前錄取的志願序 (999 代表原社團/未錄取)
-            'grade': grade
-        })
+        # 處理班級與年級判斷
+        self.grade = None
+        try:
+            cls_num = int(''.join(filter(str.isdigit, self.class_str))[:3])
+            if 101 <= cls_num <= 115:
+                self.grade = 1
+            elif 201 <= cls_num <= 215:
+                self.grade = 2
+        except:
+            pass
+            
+        # 處理志願 (套用限制)
+        self.prefs = []
+        forbidden = set()
+        ban = False
+        
+        if self.grade == 1:
+            if h1_ban_all: ban = True
+            else: forbidden = set(h1_forbidden)
+        elif self.grade == 2:
+            if h2_ban_all: ban = True
+            else: forbidden = set(h2_forbidden)
+            
+        if not ban:
+            for i in range(1, 11):
+                col = f'志願{i}'
+                if col in data:
+                    p = str(data[col]).strip()
+                    if p and p not in forbidden:
+                        self.prefs.append(p)
 
-    # 2. 核心分發迴圈 (Ripple Effect / Chain Reaction)
-    # 持續掃描所有學生，直到沒有任何變動發生
-    iteration = 0
-    max_iterations = 1000 # 防止無窮迴圈
+        self.current_assigned = self.original_club # 初始狀態在原社團
+        self.status = "原社團留任" 
+        self.rank = 999 # 999代表未錄取任何志願，0代表第一志願
+
+# -- Skipping Club definition as it is fine --
+
+# ... inside process_allocation ...
+# (We need to make sure process_allocation uses handling logic, but we can't redefine it fully here easily without context)
+# Instead, since I already replaced process_allocation in previous step, I will target the areas that need fix.
+
+# Update UI section to handle 4 return values
+# Finding the line where process_allocation is called.
+
+# First, let's fix the Student class definition at the top
+
+
+class Club:
+    def __init__(self, name, initial_vacancy):
+        self.name = str(name).strip()
+        self.initial_vacancy = int(initial_vacancy)
+        self.current_students = [] # 存放目前在此社團的學生ID
+        self.capacity = 0 # 將在初始化時計算: 初始缺額 + 初始成員數
+
+def process_allocation(students_df, clubs_df, h1_forbidden=[], h2_forbidden=[], h1_ban_all=False, h2_ban_all=False):
+    """
+    執行轉社分發邏輯 (Object-Oriented Version)
+    包含: 動態遞補 (Ripple Effect) + 最佳化交換 (Swapping) + 完整過程紀錄
+    """
     
-    while iteration < max_iterations:
+    # --- A. 初始化環境 ---
+    students = []
+    clubs = {}
+    logs = []
+    swap_logs = []
+    
+    # 1. 建立社團物件 (從缺額設定)
+    # 確保社團名稱唯一
+    if '社團名稱' in clubs_df.columns:
+        # 加總重複的社團缺額 (防呆)
+        grouped_clubs = clubs_df.groupby('社團名稱')['目前缺額'].sum()
+        for c_name, vac in grouped_clubs.items():
+            clubs[str(c_name).strip()] = Club(c_name, vac)
+    else:
+        # Fallback
+        for c_name, vac in clubs_df['目前缺額'].items():
+            clubs[str(c_name).strip()] = Club(c_name, vac)
+
+    # 2. 自動發現隱藏社團 (Critical Fix: 確保所有原社團都被追蹤)
+    # 掃描學生的原社團，若不在 clubs 中，則新增一個 initial_vacancy=0 的社團
+    all_original = students_df['原社團'].dropna().astype(str).unique()
+    for c_name in all_original:
+        c_name = str(c_name).strip()
+        if c_name and c_name not in clubs:
+            clubs[c_name] = Club(c_name, 0)
+            # print(f"Auto-discovered club: {c_name}")
+
+    # 3. 建立學生物件並放入原社團
+    # 確保依照時間排序
+    if '填寫時間' in students_df.columns:
+        students_df['填寫時間'] = pd.to_datetime(students_df['填寫時間'], errors='coerce')
+        students_df = students_df.sort_values(by="填寫時間")
+        
+    for _, row in students_df.iterrows():
+        s = Student(row, h1_forbidden, h2_forbidden, h1_ban_all, h2_ban_all)
+        students.append(s)
+        
+        # 將學生放入原社團名單 (如果原社團有效)
+        if s.original_club in clubs:
+            clubs[s.original_club].current_students.append(s.id)
+            
+    # 4. 計算社團總容量 (Capacity)
+    # 容量 = 該社團初始缺額 + 該社團的初始原有學生數
+    for c in clubs.values():
+        c.capacity = c.initial_vacancy + len(c.current_students)
+    
+    # --- B. 動態連鎖分發 (Chain Reaction) ---
+    changed = True
+    round_count = 0
+    max_rounds = 1000
+    
+    status_container = st.empty()
+    bar = st.progress(0)
+    
+    while changed and round_count < max_rounds:
         changed = False
-        iteration += 1
+        round_count += 1
+        status_container.text(f"正在進行第 {round_count} 輪分發...")
+        bar.progress(min(round_count, 100))
         
         for s in students:
-            # 嘗試提升志願
-            # 檢查比 '當前錄取順位' 更前面的志願
-            # 如果 s.rank 是 999，檢查 0..len(prefs)
-            # 如果 s.rank 是 2 (已錄取志願3，也就是 index 2)，檢查 0..1
-            
-            current_rank_index = s['rank'] if s['rank'] != 999 else len(s['prefs'])
-            
-            # 從第一志願開始尋找
-            for i in range(current_rank_index):
-                wanted_club = s['prefs'][i]
+            # 檢查每個志願
+            for i, p_club_name in enumerate(s.prefs):
                 
-                # 檢查該社團是否存在於系統中
-                if wanted_club not in club_vacancies:
-                    continue # 社團名稱對不上，跳過
+                # 如果這個志願比目前的結果更差或一樣，跳過
+                if i >= s.rank:
+                    continue
                 
-                # 檢查是否有缺額
-                if club_vacancies[wanted_club] > 0:
-                    # == 發生移動 ==
-                    old_club = s['current_club']
-                    new_club = wanted_club
+                # 檢查社團是否存在
+                if p_club_name not in clubs:
+                    continue
+                
+                target_club = clubs[p_club_name]
+                
+                # 檢查是否有空位 (目前人數 < 總容量)
+                # 總容量 = 初始願意收的人 + 原本就在裡面的人
+                # 只要有人離開 (remove)，len(current) 就會減少，名額就釋出
+                if len(target_club.current_students) < target_club.capacity:
+                    # == 移動發生 ==
+                    old_club_name = s.current_assigned
                     
-                    # 1. 扣除新社團名額
-                    club_vacancies[new_club] -= 1
+                    # 1. 從舊社團移除
+                    if old_club_name in clubs:
+                        clubs[old_club_name].current_students.remove(s.id)
                     
-                    # 2. 釋出舊社團名額 (如果舊社團在我們的管理清單中)
-                    if old_club in club_vacancies:
-                        club_vacancies[old_club] += 1
-                        
-                    # 3. 更新學生狀態
-                    s['current_club'] = new_club
-                    s['rank'] = i # 更新為第 i+1 志願 (0-based index)
-                    s['status'] = f'轉入志願{i+1}'
+                    # 2. 加入新社團
+                    target_club.current_students.append(s.id)
                     
+                    # 3. 更新狀態
+                    s.current_assigned = p_club_name
+                    s.rank = i
+                    s.status = "成功"
+                    
+                    logs.append(f"R{round_count}: {s.name} ({s.id}) 從 [{old_club_name}] 轉入 [{p_club_name}] (志願{i+1})")
                     changed = True
-                    # 該學生本次移動完成，跳出志願檢查迴圈，但在大迴圈中會因為 changed=True 再次被檢查是否能更好
-                    break 
-        
-        if not changed:
-            break
+                    break # 該學生處理完畢，換下一位 (因為他現在的位置變了，下一輪會再檢查能否更好)
 
-    # 3. 交換演算法 (Post-Optimization: Pairwise Exchange)
-    # 檢查是否有兩人互換後都能提升(或持平)志願序的情況
-    # 簡單實作：雙人互換
-    if True: # 可做為選項開關
-        exchanged = True
-        while exchanged:
-            exchanged = False
-            for i in range(len(students)):
-                for j in range(i + 1, len(students)):
-                    s1 = students[i]
-                    s2 = students[j]
-                    
-                    # S1 想要 S2 的社團 (且比 S1 現在的更好)
-                    s1_wants_s2 = False
-                    s1_benefit = -1
-                    if s2['current_club'] in s1['prefs']:
-                        idx = s1['prefs'].index(s2['current_club'])
-                        if idx < ((s1['rank'] if s1['rank'] != 999 else 999)):
-                            s1_wants_s2 = True
-                            s1_benefit = idx
-                    
-                    # S2 想要 S1 的社團 (且比 S2 現在的更好)
-                    s2_wants_s1 = False
-                    s2_benefit = -1
-                    if s1['current_club'] in s2['prefs']:
-                        idx = s2['prefs'].index(s1['current_club'])
-                        if idx < ((s2['rank'] if s2['rank'] != 999 else 999)):
-                            s2_wants_s1 = True
-                            s2_benefit = idx
-                            
-                    # 執行交換
-                    if s1_wants_s2 and s2_wants_s1:
-                        c1 = s1['current_club']
-                        c2 = s2['current_club']
-                        
-                        s1['current_club'] = c2
-                        s1['rank'] = s1_benefit
-                        s1['status'] = f'交換至志願{s1_benefit+1}'
-                        
-                        s2['current_club'] = c1
-                        s2['rank'] = s2_benefit
-                        s2['status'] = f'交換至志願{s2_benefit+1}'
-                        
-                        exchanged = True
-                        # print(f"Swapped {s1['name']} and {s2['name']}")
+    status_container.text("進行交換最佳化...")
+    
+    # --- C. 最佳化交換 (Post-Optimization) ---
+    swapped = True
+    while swapped:
+        swapped = False
+        for s1 in students:
+            if s1.rank == 0: continue # 已滿足第一志願
+            
+            for s2 in students:
+                if s1.id == s2.id: continue
+                if s2.rank == 0: continue
+                
+                c1 = s1.current_assigned
+                c2 = s2.current_assigned
+                
+                if c1 == c2: continue
+                
+                # 檢查 s1 是否想去 c2 且更好
+                if c2 in s1.prefs:
+                    r1 = s1.prefs.index(c2)
+                    if r1 < s1.rank:
+                        # 檢查 s2 是否想去 c1 且更好
+                        if c1 in s2.prefs:
+                            r2 = s2.prefs.index(c1)
+                            if r2 < s2.rank:
+                                # == 執行交換 ==
+                                s1.current_assigned = c2
+                                s1.rank = r1
+                                
+                                s2.current_assigned = c1
+                                s2.rank = r2
+                                
+                                # 更新社團名單 (這裡其實不影響容量，只是交換人頭)
+                                if c1 in clubs:
+                                    clubs[c1].current_students.remove(s1.id)
+                                    clubs[c1].current_students.append(s2.id)
+                                if c2 in clubs:
+                                    clubs[c2].current_students.remove(s2.id)
+                                    clubs[c2].current_students.append(s1.id)
+                                    
+                                swap_logs.append(f"{s1.name} <-> {s2.name} : {c1} <-> {c2}")
+                                swapped = True
 
-    # 4. 整理結果
+    status_container.empty()
+    bar.empty()
+    
+    # --- D. 整理結果 ---
     results = []
     for s in students:
-        res = {
-            '學號': s['id'],
-            '姓名': s['name'],
-            '班級': s['class'],
-            '原社團': s['original_club'],
-            '分發結果': s['current_club'],
-            '錄取志願序': s['rank'] + 1 if s['rank'] != 999 else '未轉社',
-            '狀態': '成功' if s['current_club'] != s['original_club'] else '未變更'
-        }
-        results.append(res)
+        results.append({
+            '學號': s.id,
+            '姓名': s.name,
+            '班級': s.class_str,
+            '原社團': s.original_club,
+            '分發結果': s.current_assigned,
+            '錄取志願序': s.rank + 1 if s.rank != 999 else '未轉社',
+            '狀態': '成功' if s.current_assigned != s.original_club else '未變更'
+        })
         
-    return pd.DataFrame(results), pd.DataFrame(list(club_vacancies.items()), columns=['社團名稱', '剩餘缺額'])
+    # 計算剩餘缺額
+    vac_data = []
+    for c in clubs.values():
+        remaining = c.capacity - len(c.current_students)
+        vac_data.append({'社團名稱': c.name, '剩餘缺額': max(0, remaining)})
+        
+    return pd.DataFrame(results), pd.DataFrame(vac_data), logs, swap_logs
+
 
 # === UI 部分 ===
 st.title("🔀 學生轉社系統 (Student Club Transfer)")
@@ -275,17 +327,35 @@ else:
 # 限制設定
 st.sidebar.header("3. 限制設定")
 st.sidebar.caption("設定特定年級無法轉入的社團 (將自動略過該志願)")
+
+# 整合所有來源的社團名單 (學生資料 + 社團缺額設定)
+if '社團名稱' in clubs_df.columns: 
+    # 注意: 若是手動輸入模式且尚未存入 clubs_df (例如剛啟動)，可能要看 session_state
+    if not clubs_df.empty:
+        all_clubs_found.update(clubs_df['社團名稱'].dropna().astype(str).unique())
+
+if 'editor_clubs' in st.session_state and not st.session_state['editor_clubs'].empty:
+    all_clubs_found.update(st.session_state['editor_clubs']['社團名稱'].dropna().astype(str).unique())
+
 available_clubs_list = sorted(list(all_clubs_found)) if all_clubs_found else []
 
-h1_forbidden = st.sidebar.multiselect(
-    "❌ 高一 (101-115) 不能轉入的社團",
-    options=available_clubs_list
-)
+st.sidebar.subheader("高一 (101-115)")
+h1_ban_all = st.sidebar.checkbox("🚫 禁止高一所有轉社 (完全凍結)", value=False, key="h1_ban_all")
+h1_forbidden = []
+if not h1_ban_all:
+    h1_forbidden = st.sidebar.multiselect(
+        "❌ 高一禁止轉入的社團",
+        options=available_clubs_list
+    )
 
-h2_forbidden = st.sidebar.multiselect(
-    "❌ 高二 (201-215) 不能轉入的社團",
-    options=available_clubs_list
-)
+st.sidebar.subheader("高二 (201-215)")
+h2_ban_all = st.sidebar.checkbox("🚫 禁止高二所有轉社 (完全凍結)", value=False, key="h2_ban_all")
+h2_forbidden = []
+if not h2_ban_all:
+    h2_forbidden = st.sidebar.multiselect(
+        "❌ 高二禁止轉入的社團",
+        options=available_clubs_list
+    )
 
 # Main Area
 if students_df is not None:
@@ -314,10 +384,20 @@ if start_btn and students_df is not None and not clubs_df.empty:
         # 確保 clubs_df 格式正確 (如果是 data_editor 回傳的，可能型別要轉)
         clubs_df['目前缺額'] = pd.to_numeric(clubs_df['目前缺額'], errors='coerce').fillna(0).astype(int)
         
-        result_df, vacancies_df = process_allocation(students_df, clubs_df, h1_forbidden=h1_forbidden, h2_forbidden=h2_forbidden)
+        result_df, vacancies_df, logs, swap_logs = process_allocation(
+            students_df, 
+            clubs_df, 
+            h1_forbidden=h1_forbidden, 
+            h2_forbidden=h2_forbidden,
+            h1_ban_all=h1_ban_all,
+            h2_ban_all=h2_ban_all
+        )
         
         st.session_state['result_df'] = result_df
         st.session_state['final_vacancies'] = vacancies_df
+        st.session_state['logs'] = logs
+        st.session_state['swap_logs'] = swap_logs
+        
         st.success("分發完成！")
 
 # Results Display
@@ -327,8 +407,10 @@ if 'result_df' in st.session_state:
     
     res = st.session_state['result_df']
     vac = st.session_state['final_vacancies']
+    logs = st.session_state.get('logs', [])
+    swap_logs = st.session_state.get('swap_logs', [])
     
-    tab1, tab2, tab3 = st.tabs(["📋 成功名單", "⚠️ 未變更/失敗名單", "📊 社團餘額"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📋 成功名單", "⚠️ 未變更/失敗名單", "📊 社團餘額", "📜 遞補日誌", "🔄 交換紀錄"])
     
     with tab1:
         success_list = res[res['狀態'] == '成功']
@@ -342,6 +424,17 @@ if 'result_df' in st.session_state:
         
     with tab3:
         st.dataframe(vac)
+        
+    with tab4:
+        st.caption("顯示名額釋出後的動態遞補過程")
+        st.text_area("遞補過程", "\n".join(logs), height=300)
+        
+    with tab5:
+        if swap_logs:
+            st.success(f"系統自動執行了 {len(swap_logs)} 組交換")
+            st.text_area("交換紀錄", "\n".join(swap_logs), height=300)
+        else:
+            st.info("本次無可進行的最佳化交換")
 
     # Download
     output = io.BytesIO()
@@ -349,6 +442,10 @@ if 'result_df' in st.session_state:
         res.to_excel(writer, sheet_name='分發結果', index=False)
         vac.to_excel(writer, sheet_name='剩餘缺額', index=False)
         success_list.to_excel(writer, sheet_name='成功名單', index=False)
+        if logs:
+             pd.DataFrame({'Log': logs}).to_excel(writer, sheet_name='遞補日誌', index=False)
+        if swap_logs:
+             pd.DataFrame({'Swap': swap_logs}).to_excel(writer, sheet_name='交換紀錄', index=False)
     
     st.download_button(
         label="📥 下載完整結果 Excel",
