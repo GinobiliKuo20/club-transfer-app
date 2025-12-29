@@ -121,17 +121,20 @@ def process_allocation(students_df, clubs_df, h1_forbidden=[], h2_forbidden=[], 
     
     # --- B. 動態連鎖分發 (Chain Reaction) ---
     changed = True
-    round_count = 0
-    max_rounds = 1000
+    iteration = 0
+    max_iterations = len(students) * 10 + 2000 # 增加上限，因為每次只移動一人就重來
     
     status_container = st.empty()
     bar = st.progress(0)
     
-    while changed and round_count < max_rounds:
+    while changed and iteration < max_iterations:
         changed = False
-        round_count += 1
-        status_container.text(f"正在進行第 {round_count} 輪分發...")
-        bar.progress(min(round_count, 100))
+        iteration += 1
+        
+        # UI 更新頻率控制 (每 10 輪更新一次，避免拖慢效能)
+        if iteration % 10 == 0:
+            status_container.text(f"正在進行第 {iteration} 輪動態分發 (優先權掃描)...")
+            bar.progress(min(iteration % 100, 100))
         
         for s in students:
             # 檢查每個志願
@@ -166,9 +169,12 @@ def process_allocation(students_df, clubs_df, h1_forbidden=[], h2_forbidden=[], 
                     s.rank = i
                     s.status = "成功"
                     
-                    logs.append(f"R{round_count}: {s.name} ({s.id}) 從 [{old_club_name}] 轉入 [{p_club_name}] (志願{i+1})")
+                    logs.append(f"#{iteration}: {s.name} ({s.id}) 從 [{old_club_name}] 轉入 [{p_club_name}] (志願{i+1})")
                     changed = True
-                    break # 該學生處理完畢，換下一位 (因為他現在的位置變了，下一輪會再檢查能否更好)
+                    break # 跳出志願迴圈
+            
+            if changed:
+                break # !!! 關鍵修正：跳出學生迴圈，重新從第 1 位學生開始掃描 (Strict Priority)
 
     status_container.text("進行交換最佳化...")
     
