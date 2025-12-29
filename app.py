@@ -170,10 +170,18 @@ students_df = None
 if uploaded_students:
     try:
         students_df = pd.read_excel(uploaded_students)
+        
+        # 清除欄位名稱前後空白 (避免使用者不小心多打空白)
+        students_df.columns = students_df.columns.str.strip()
+        
         # 基本欄位檢查
         req_cols = ['學號', '姓名', '填寫時間', '原社團']
-        if not all(col in students_df.columns for col in req_cols):
-            st.sidebar.error(f"Excel 缺少必要欄位: {req_cols}")
+        missing_cols = [c for c in req_cols if c not in students_df.columns]
+        
+        if missing_cols:
+            st.sidebar.error(f"Excel 缺少必要欄位: {missing_cols}")
+            st.sidebar.warning(f"目前讀取到的欄位: {list(students_df.columns)}")
+            st.sidebar.info("請檢查 Excel 標題列是否包含上述欄位，且沒有多餘的空白或錯字。")
             students_df = None
         else:
             st.sidebar.success(f"已讀取 {len(students_df)} 名學生資料")
