@@ -131,8 +131,8 @@ def process_allocation(students_df, clubs_df, h1_forbidden=[], h2_forbidden=[], 
         changed = False
         iteration += 1
         
-        # UI 更新頻率控制 (每 10 輪更新一次，避免拖慢效能)
-        if iteration % 10 == 0:
+        # UI 更新頻率控制 (每 5 輪更新一次，避免拖慢效能)
+        if iteration % 5 == 0:
             status_container.text(f"正在進行第 {iteration} 輪動態分發 (優先權掃描)...")
             bar.progress(min(iteration % 100, 100))
         
